@@ -27,6 +27,7 @@ if t == temp.models:
     print("no models are running")
     print("model will be assumed as \"gemma4\"")
     modelName="gemma4"
+    name = "gemma4:e2b"
 con = sqlite3.connect("brain.db")
 cur = con.cursor()
 
@@ -139,28 +140,44 @@ tools = {"database_search": (database_search, {"keyword"}),
          "web_search":(web_search, {"keywords"}),
          "web_fetch":(web_fetch, {"url"})}
 
-def command_parse(command):
-    try:
-        command = json.loads(command)
-        if not isinstance(command,dict):
-            print("Invalid input, expected JSON")
-            return 0
-        tool =command.get("tool")
-        args=command.get("arguments")
-        if tool=="response":
-            if not isinstance(args,dict):
-                print("Error: invalid arguments")
-                return 0
-            message = args.get("message")
-            if not isinstance(message,str):
-                print("Error: message must be a string")
-                return 0
-    except json.JSONDecodeError:
-        print("invalid JSON")
-    except Exception as e:
-        print(f"Error: {e}")
+def command_parse(sonion):
+    print()
+    command = sonion.get("command")
+    args = sonion.get("argument")
+    if command=="database_new":
+        subject = args.get("subject")
+        content = args.get("content")
+        database_new(subject,content)
+    if command=="database_search":
+        keyword = args.get("keyword")
+        results = database_search(keyword)
+        return results
+    if command=="database_delete":
+        id = args.get("id")
+        database_delete(id)
+    if command=="graph_exists":
+        node_name = args.get("node_name")
+        result = graph_exists(node_name)
+        return result
+    if command == "graph_relations":
+        node_name = args.get("node_name")
+        results = graph_relations(node_name)
+    if command == "graph_create_node":
+        node_name = args.get("node_name")
+        graph_create_node(node_name)
+    if command == "graph_link_nodes":
+        node1 = args.get("node_name_1")
+        node2 = args.get("node_name_2")
+        relation = args.get("relation")
+        graph_link_nodes(node1,node2,relation)
+    if command == "web_fetch":
+        url = args.get("url")
+        result = web_fetch(url)
+    if command == "web_search":
+        keywords = args.get("keywords")
+        result = web_search(keywords)
 
-def start():
+def u():
     done = False
     while not done:
         a=input(">>> ")
@@ -208,12 +225,33 @@ def start():
             done=True
         else:
             print("not a valid command.")
-
-usr = input(">")
-if usr == "?":
-    print("command : command line to test tools")
-    print("llm : connect to available llm")
-elif usr=="command":
-    start()
-elif usr == "llm":
-    print("idk man")
+thinkin = True
+done = False
+while not done:
+    usr = input("enter a command: ")
+    if usr == "?":
+        print("command : command line to test tools")
+        print("llm : connect to available llm")
+    elif usr=="command":
+        u()
+    elif usr == "llm":
+        finished = False
+        while not finished:
+            inp = input(">>> ")
+            if inp.lower()=="exit":
+                finished = True
+                done = True
+                break
+            response = ollama.chat(model=f"{name}",messages=[{"role": "user", "content": f"{inp}"}],stream=True)
+            for bit in response:
+                if bit.message.thinking:
+                    print(f"\033[90m{bit.message.thinking}\033[0m",end="",flush=True)
+                    thinkin=True
+                if bit.message.content:
+                    if thinkin==True:
+                        thinkin=False
+                        print("")
+                    print(bit.message.content,end="",flush=True)
+            print()
+    else:
+        print("unknown command, type \"?\" for commands list")
