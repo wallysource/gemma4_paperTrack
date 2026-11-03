@@ -80,10 +80,10 @@ def graph_relations(node_name):
     return result.result_set
 
 def graph_create_node(node_name):
-    print()
+    graph.query("""CREATE (p {name:$name}) RETURN (p)""",params={"name":node_name})
 
 def graph_link_nodes(node_name_1,node_name_2,relationship):
-    print()
+    graph.query(f"""MERGE (a {{name:$name1}}) MERGE (b {{name:$name2}}) MERGE (a)-[r:{relationship}]->(b) RETURN a,r,b""",params={"name1":node_name_1,"name2":node_name_2})
 
 def web_search(keywords):
     search_query=keywords
