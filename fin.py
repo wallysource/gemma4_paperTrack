@@ -6,13 +6,14 @@ from ddgs import DDGS
 import json
 import requests
 from bs4 import BeautifulSoup
+from typing import Literal, Union
+from pydantic import BaseModel, Field
+import trafilatura
 
 #command to install all dependancies:
-#python -m pip install ollama falkordb ddgs beautifulsoup4 requests
+#python -m pip install ollama falkordb ddgs beautifulsoup4 requests trafilatura
 
-
-inputArr="","",""
-
+#initialisation checks:
 try:
     temp = ollama.ps()
 except Exception:
@@ -44,93 +45,247 @@ try:
     graph = db.select_graph(f'{modelName}')
 except Exception:
     print("FalkorDB connection failed.")
-def strt():
-    done = False
-    while not done:
-        print()
+
+#declaring command structure using pydantic
+
+class Databasenew(BaseModel):
+    tool: Literal["database_new"]
+    subject:str
+    content:str
+class Databasesearch(BaseModel):
+    tool: Literal["database_search"]
+    keyword:str
+class Databasedelete(BaseModel):
+    tool:Literal["database_delete"]
+    id:int
+class Graphexists(BaseModel):
+    tool:Literal["graph_exists"]
+    node_name:str
+class Graphrelations(BaseModel):
+    tool:Literal["graph_relations"]
+    node_name:str
+class Graphcreatenode(BaseModel):
+    tool:Literal["graph_create_node"]
+    node_name:str
+class Graphlinknodes(BaseModel):
+    tool:Literal["graph_link_nodes"]
+    node_name_1:str
+    node_name_2:str
+    relationship:str
+class Webfetch(BaseModel):
+    tool:Literal["web_fetch"]
+    url:str
+class Websearch(BaseModel):
+    tool:Literal["web_search"]
+    keywords:str
+class ToolCommand(BaseModel):
+    command:Union[
+        Websearch,
+        Webfetch,
+        Graphcreatenode,
+        Graphexists,
+        Graphlinknodes,
+        Graphrelations,
+        Databasedelete,
+        Databasenew,
+        Databasesearch
+    ] = Field(...,discriminator="tool")
+inputArr="","",""
+
+def get_llm_command(user_prompt: str)->Union[Websearch,Webfetch,Graphcreatenode,Graphexists,Graphlinknodes,Graphlinknodes,Graphrelations,Databasedelete,Databasenew,Databasesearch]:
+    response = ollama.chat(model=f"{name}",messages=[{"role":"system","content":("you are an LLM with some tools. select the most appropriate command and populate its parameters based on the user's and your needs."),},{"role":"user","content":user_prompt},],format=ToolCommand.model_json_schema(),options={"temperature":0},)
+    structured_output = ToolCommand.model_validate_json(response.message.content)
+    return structured_output.command
 
 #parsed function inputs
 
 def database_search(keyword):
-    cur.execute(f'SELECT * FROM "{modelName}" WHERE subject LIKE ?', (f"%{keyword}%",))
-    rows=cur.fetchall()
-    return rows
+    success = True
+    error="None"
+    try:
+        cur.execute(f'SELECT * FROM "{modelName}" WHERE subject LIKE ?', (f"%{keyword}%",))
+        rows=cur.fetchall()
+        results=[]
+        counter=0
+        for rel in rows:
+            counter+=1
+            results.append({f"entry {counter}":str(rel)})
+    except Exception as error:
+        error=str(error)
+        success=False
+    # for rel in result: print(rel)
+    return {
+                "success": success,
+                "tool": "database_search",
+                "data": {
+                    "keyword": keyword,
+                    "results":results
+                },
+                "error": error
+            }
 
 def database_new(subject,content):
+    error="None"
+    success = True
     try:
         cur.execute(f'''INSERT INTO "{modelName}" (subject, content) VALUES (?, ?)''', (subject, content))
         con.commit()
-    except Exception:
-        return 0
-    return 1
+    except Exception as error:
+        error=str(error)
+        success=False
+    return {
+                "success": success,
+                "tool": "database_new",
+                "data": {
+                    "subject": subject,
+                    "content":content
+                },
+                "error": error
+            }
 
 def database_delete(id):
-    cur.execute(f'DELETE FROM "{modelName}" WHERE id = ?',(id,))
-    con.commit()
+    success=True
+    error="None"
+    try:
+        cur.execute(f'DELETE FROM "{modelName}" WHERE id = ?',(id,))
+        con.commit()
+    except Exception as error:
+        error=str(error)
+        success=False
+    return {
+                "success": success,
+                "tool": "database_delete",
+                "data": {
+                    "id": id,
+                },
+                "error": error
+            }
 
 def graph_exists(node_name):
-    result = graph.query("""MATCH (n {name: $name}) RETURN n.name""",params={"name": node_name})
-    if result is not []:
-        return True
-    else :
-        return False
+    success=True
+    error="None"
+    try:
+        result = graph.query("""MATCH (n {name: $name}) RETURN n.name""",params={"name": node_name})
+        fin = len(result.result_set) > 0
+    except Exception as error:
+        error=str(error)
+        success=False
+    return {
+            "success": success,
+            "tool": "graph_exists",
+            "data": {
+                "node_name": node_name,
+                "Node Exists?": fin
+            },
+            "error": error
+        }
     
 def graph_relations(node_name):
-    result = graph.query("""MATCH (n)-[r]->(m) WHERE n.name = $node_name RETURN n.name, type(r), m.name""",params={"node_name":node_name})
-    return result.result_set
-
-def graph_create_node(node_name):
-    graph.query("""CREATE (p {name:$name}) RETURN (p)""",params={"name":node_name})
-
-def graph_link_nodes(node_name_1,node_name_2,relationship):
-    graph.query(f"""MERGE (a {{name:$name1}}) MERGE (b {{name:$name2}}) MERGE (a)-[r:{relationship}]->(b) RETURN a,r,b""",params={"name1":node_name_1,"name2":node_name_2})
-
-def web_search(keywords):
-    search_query=keywords
-    ddgs=DDGS()
-    results = list(ddgs.text(query=search_query,region='us-en',safesearch='off',max_results=10))
-    return results
-    #returns 'title':title,'href':url and 'body':idk some text
-
-def web_fetch(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0"
+    error="None"
+    success=True
+    results=[]
+    try:
+        result = graph.query("""MATCH (n)-[r]->(m) WHERE n.name = $node_name RETURN n.name, type(r), m.name""",params={"node_name":node_name})
+        for row in result.result_set:
+            results.append({
+                "source": row[0],
+                "relationship": row[1],
+                "target": row[2]
+            })
+    except Exception as error:
+            error=str(error)
+            success = False
+    return {
+        "success": success,
+        "tool": "graph_relations",
+        "data": {
+            "node_name": node_name,
+            "results": results
+        },
+        "error": error
     }
 
+def graph_create_node(node_name):
+    error="None"
+    success=True
     try:
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=15
-        )
-        response.raise_for_status()
+        graph.query("""CREATE (p {name:$name}) RETURN (p)""",params={"name":node_name})
+    except Exception as error:
+        error=str(error)
+        success = False
+    return {
+                "success": success,
+                "tool": "graph_create_node",
+                "data": {
+                    "node_name": node_name,
+                },
+                "error": error
+            }
 
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        # Remove unnecessary elements
-        for tag in soup([
-            "script", "style", "noscript",
-            "nav", "footer", "header", "iframe"
-        ]):
-            tag.decompose()
-
-        # Extract the page title
-        title = soup.title.get_text(strip=True) if soup.title else "No title"
-
-        # Extract readable text from the page
-        text = soup.get_text(separator="\n", strip=True)
-
-        return {
-            "url": url,
-            "title": title,
-            "text": text
+def graph_link_nodes(node_name_1,node_name_2,relationship):
+    error="None"
+    success=True
+    try:
+        graph.query(f"""MERGE (a {{name:$name1}}) MERGE (b {{name:$name2}}) MERGE (a)-[r:{relationship}]->(b) RETURN a,r,b""",params={"name1":node_name_1,"name2":node_name_2})
+    except Exception as error:
+        error=str(error)
+        success = False
+    return {
+            "success": success,
+            "tool": "graph_link_nodes",
+            "data": {
+                "node_name_1": node_name_1,
+                "node_name_2": node_name_2,
+                "relationship":relationship
+            },
+            "error": error
         }
 
-    except requests.RequestException as e:
-        return {
-            "url": url,
-            "error": str(e)
-        }
+def web_search(keywords):
+    error="None"
+    success=True
+    try:
+        search_query=keywords
+        ddgs=DDGS()
+        results = list(ddgs.text(query=search_query,region='us-en',safesearch='off',max_results=10))
+    except Exception as error:
+        success = False
+        error=str(error)
+        results=""
+    return {
+        "success": success,
+        "tool": "web_search",
+        "data": {
+            "keywords": keywords,
+            "results": results
+        },
+        "error": error
+    }
+
+def web_fetch(url):
+    error="None"
+    success=True
+    try:
+        downloaded = trafilatura.fetch_url(url)
+        text = trafilatura.extract(downloaded)
+    except Exception as error:
+        success=False
+        url=""
+        text=""
+        error=str(error)
+    if text is None:
+        success=False
+        text=""
+        error="failed to extract text"
+    return {
+                "success":success,
+                "tool":"web_fetch",
+                "data":{
+                    "url": url,
+                    "text": text
+                },
+                "error": error
+            }
 
 tools = {"database_search": (database_search, {"keyword"}),
          "database_new":(database_new, {"subject","content"}),
@@ -138,45 +293,90 @@ tools = {"database_search": (database_search, {"keyword"}),
          "graph_exists":(graph_exists, {"node_name"}),
          "graph_relations":(graph_relations, {"node_name"}),
          "web_search":(web_search, {"keywords"}),
-         "web_fetch":(web_fetch, {"url"})}
+         "web_fetch":(web_fetch, {"url"}),
+         "graph_link_nodes":(graph_link_nodes,{"node_name_1","node_name_2","relationship"}),
+         "graph_create_node":(graph_create_node,{"node_name"})}
 
+
+#parsing command
 def command_parse(sonion):
-    print()
-    command = sonion.get("command")
-    args = sonion.get("argument")
+    command = sonion.tool
     if command=="database_new":
-        subject = args.get("subject")
-        content = args.get("content")
-        database_new(subject,content)
-    if command=="database_search":
-        keyword = args.get("keyword")
-        results = database_search(keyword)
-        return results
-    if command=="database_delete":
-        id = args.get("id")
-        database_delete(id)
-    if command=="graph_exists":
-        node_name = args.get("node_name")
+        subject = sonion.subject
+        content = sonion.content
+        result=database_new(subject,content)
+        return result
+    elif command=="database_search":
+        keyword = sonion.keyword
+        result = database_search(keyword)
+        return result
+    elif command=="database_delete":
+        id = sonion.id
+        result=database_delete(id)
+        return result
+    elif command=="graph_exists":
+        node_name = sonion.node_name
         result = graph_exists(node_name)
         return result
-    if command == "graph_relations":
-        node_name = args.get("node_name")
-        results = graph_relations(node_name)
-    if command == "graph_create_node":
-        node_name = args.get("node_name")
-        graph_create_node(node_name)
-    if command == "graph_link_nodes":
-        node1 = args.get("node_name_1")
-        node2 = args.get("node_name_2")
-        relation = args.get("relation")
-        graph_link_nodes(node1,node2,relation)
-    if command == "web_fetch":
-        url = args.get("url")
+    elif command == "graph_relations":
+        node_name = sonion.node_name
+        result = graph_relations(node_name)
+        return result
+    elif command == "graph_create_node":
+        node_name = sonion.node_name
+        result = graph_create_node(node_name)
+        return result
+    elif command == "graph_link_nodes":
+        node1 = sonion.node_name_1
+        node2 = sonion.node_name_2
+        relation = sonion.relationship
+        result=graph_link_nodes(node1,node2,relation)
+        return result
+    elif command == "web_fetch":
+        url = sonion.url
         result = web_fetch(url)
-    if command == "web_search":
-        keywords = args.get("keywords")
+        return result
+    elif command == "web_search":
+        keywords = sonion.keywords
         result = web_search(keywords)
+        return result
+    elif command == "response":
+        return response
+#for agent and tool interaction
+def agent(user_input):
 
+    # Ask LLM to select a command
+    command = get_llm_command(user_input)
+
+    # Execute command
+    result = command_parse(command)
+
+    # Send result back to LLM
+    response = ollama.chat(
+        model=name,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a helpful AI assistant. "
+                           "Use the provided tool results to answer."
+            },
+            {
+                "role": "user",
+                "content": user_input
+            },
+            {
+                "role": "assistant",
+                "content": "I executed a tool."
+            },
+            {
+                "role": "user",
+                "content": f"Tool result: {json.dumps(result)}"
+            }
+        ]
+    )
+
+    return response.message.content
+#user commands
 def u():
     done = False
     while not done:
@@ -187,40 +387,32 @@ def u():
         elif a=="database_search":
             v1 = input("enter content to search: ")
             result = database_search(v1)
-            for rel in result:
-                print(rel)
+            print(json.dumps(result, indent=4))
         elif a=="database_delete":
             v1 = int(input("enter ID of entry to delete: "))
-            database_delete(v1)
+            result=database_delete(v1)
+            print(json.dumps(result, indent=4))
         elif a=="database_new":
             v1 = input("enter subject of new entry: ")
             v2 = input("enter content of new entry: ")
-            database_new(v1,v2)
+            result=database_new(v1,v2)
+            print(json.dumps(result, indent=4))
         elif a=="graph_exists":
             v1 = input("enter node name: ")
-            if graph_exists(v1):
-                print("that node exists.")
-            else:
-                print("that node doesn't exist.")
+            result=graph_exists(v1)
+            print(json.dumps(result, indent=4))
         elif a=="graph_relations":
             v1 = input("enter a node name: ")
-            if graph_exists(v1):
-                results = graph_relations(v1)
-                for row in results.result_set:
-                    print(f"{row[0]}--{row[1]}->{row[2]}\n")
-            else:
-                print("no node of that name exists.")
+            result = graph_relations(v1)
+            print(json.dumps(result, indent=4))
         elif a=="web_fetch":
             v1 = input("enter URL: ")
             result = web_fetch(v1)
-            print(f"URL: {result['url']}")
-            print(f"Title: {result['title']}")
-            print(f"Text Preview (first 300 chars): {result['text'][:300]}...")
+            print(json.dumps(result, indent=4))
         elif a=="web_search":
             v1 = input("enter search keyword (stuff like searching for \"IPhone\" wont work with any other variation of capital\\small letters): ")
             result = web_search(v1)
-            for res in result:
-                print(f"Title: {res['title']}\nURL: {res['href']}\nBody: {res['body']}\n\n")
+            print(json.dumps(result, indent=4))
         elif a=="exit":
             done=True
         else:
