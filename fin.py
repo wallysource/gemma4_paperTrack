@@ -4,14 +4,12 @@ import re
 import sqlite3
 from ddgs import DDGS
 import json
-import requests
-from bs4 import BeautifulSoup
 from typing import Literal, Union
 from pydantic import BaseModel, Field
 import trafilatura
 
 #command to install all dependancies:
-#python -m pip install ollama falkordb ddgs beautifulsoup4 requests trafilatura
+#python -m pip install ollama falkordb ddgs trafilatura
 
 #initialisation checks:
 try:
@@ -78,6 +76,9 @@ class Webfetch(BaseModel):
 class Websearch(BaseModel):
     tool:Literal["web_search"]
     keywords:str
+class FinalResponse(BaseModel):
+    tool:Literal["final_response"]
+    response:str
 class ToolCommand(BaseModel):
     command:Union[
         Websearch,
@@ -88,11 +89,12 @@ class ToolCommand(BaseModel):
         Graphrelations,
         Databasedelete,
         Databasenew,
-        Databasesearch
+        Databasesearch,
+        FinalResponse
     ] = Field(...,discriminator="tool")
 inputArr="","",""
 
-def get_llm_command(user_prompt: str)->Union[Websearch,Webfetch,Graphcreatenode,Graphexists,Graphlinknodes,Graphlinknodes,Graphrelations,Databasedelete,Databasenew,Databasesearch]:
+def get_llm_command(user_prompt: str)->Union[Websearch,Webfetch,Graphcreatenode,Graphexists,Graphlinknodes,Graphlinknodes,Graphrelations,Databasedelete,Databasenew,Databasesearch,FinalResponse]:
     response = ollama.chat(model=f"{name}",messages=[{"role":"system","content":("you are an LLM with some tools. select the most appropriate command and populate its parameters based on the user's and your needs."),},{"role":"user","content":user_prompt},],format=ToolCommand.model_json_schema(),options={"temperature":0},)
     structured_output = ToolCommand.model_validate_json(response.message.content)
     return structured_output.command
@@ -345,37 +347,47 @@ def command_parse(sonion):
 #for agent and tool interaction
 def agent(user_input):
 
-    # Ask LLM to select a command
-    command = get_llm_command(user_input)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an autonomous AI agent with access to tools. "
+                "Use tools whenever necessary to fulfil the user's request. "
+                "You may execute multiple tools in sequence. "
+                "Examine each tool result before deciding what to do next. "
+                "Only use final_response when you have enough information "
+                "to answer the user."
+            )
+        },
+        {
+            "role": "user",
+            "content": user_input
+        }
+    ]
 
-    # Execute command
-    result = command_parse(command)
+    for iteration in range(10):
 
-    # Send result back to LLM
-    response = ollama.chat(
-        model=name,
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful AI assistant. "
-                           "Use the provided tool results to answer."
-            },
-            {
-                "role": "user",
-                "content": user_input
-            },
-            {
-                "role": "assistant",
-                "content": "I executed a tool."
-            },
-            {
-                "role": "user",
-                "content": f"Tool result: {json.dumps(result)}"
-            }
-        ]
-    )
+        # Ask LLM what to do next
+        command = get_llm_command(messages)
 
-    return response.message.content
+        # Check whether the agent is finished
+        if isinstance(command, FinalResponse):
+            return command.response
+
+        # Execute selected tool
+        result = command_parse(command)
+
+        # Give the LLM the result
+        messages.append({
+            "role": "assistant",
+            "content": command.model_dump_json()
+        })
+
+        messages.append({
+            "role": "user",
+            "content": f"Tool result: {json.dumps(result)}"
+        })
+        return "I couldn't complete the request within the tool-use limit."
 #user commands
 def u():
     done = False
@@ -434,16 +446,7 @@ while not done:
                 finished = True
                 done = True
                 break
-            response = ollama.chat(model=f"{name}",messages=[{"role": "user", "content": f"{inp}"}],stream=True)
-            for bit in response:
-                if bit.message.thinking:
-                    print(f"\033[90m{bit.message.thinking}\033[0m",end="",flush=True)
-                    thinkin=True
-                if bit.message.content:
-                    if thinkin==True:
-                        thinkin=False
-                        print("")
-                    print(bit.message.content,end="",flush=True)
-            print()
+            response = agent(inp)
+            print(response)
     else:
         print("unknown command, type \"?\" for commands list")
