@@ -1,15 +1,20 @@
-import ollama
-from falkordb import FalkorDB 
-import re
-import sqlite3
-from ddgs import DDGS
-import json
-from typing import Literal, Union
-from pydantic import BaseModel, Field
-import trafilatura
+lazy import ollama
+lazy from falkordb import FalkorDB 
+lazy import re
+lazy import sqlite3
+lazy from ddgs import DDGS
+lazy import json
+lazy from typing import Literal, Union
+lazy from pydantic import BaseModel, Field
+lazy import trafilatura
+lazy import logging
+lazy from datetime import datetime
 
 #command to install all dependancies:
 #python -m pip install ollama falkordb ddgs trafilatura
+current_datetime_str = datetime.now().strftime("%d-%m-%y %H hours %M minutes,%S seconds")
+logfile = open(f"D:/log {current_datetime_str}.log",'x')
+logging.basicConfig(filename=f"log {current_datetime_str}.log",level=logging.INFO,format="%(asctime)s [%(levelname)s] %(message)s",datefmt="%Y/%m/%d %H:%M:%S")
 
 #initialisation checks:
 try:
@@ -27,6 +32,7 @@ if t == temp.models:
     print("model will be assumed as \"gemma4\"")
     modelName="gemma4"
     name = "gemma4:e2b"
+    logging.info("no models were running")
 con = sqlite3.connect("brain.db")
 cur = con.cursor()
 
@@ -43,6 +49,7 @@ try:
     graph = db.select_graph(f'{modelName}')
 except Exception:
     print("FalkorDB connection failed.")
+    logging.error("falkordb didnt connect")
 
 #declaring command structure using pydantic
 
@@ -76,6 +83,13 @@ class Webfetch(BaseModel):
 class Websearch(BaseModel):
     tool:Literal["web_search"]
     keywords:str
+class Scratchpadread(BaseModel):
+    tool:Literal["scratchpad_read"]
+class Scratchpadappend(BaseModel):
+    tool:Literal["scratchpad_append"]
+    info:str
+class Scratchpadclear(BaseModel):
+    tool:Literal["scratchpad_clear"]
 class FinalResponse(BaseModel):
     tool:Literal["final_response"]
     response:str
@@ -90,38 +104,48 @@ class ToolCommand(BaseModel):
         Databasedelete,
         Databasenew,
         Databasesearch,
+        Scratchpadread,
+        Scratchpadappend,
+        Scratchpadclear,
         FinalResponse
     ] = Field(...,discriminator="tool")
 inputArr="","",""
 
-def get_llm_command(user_prompt: str)->Union[Websearch,Webfetch,Graphcreatenode,Graphexists,Graphlinknodes,Graphlinknodes,Graphrelations,Databasedelete,Databasenew,Databasesearch,FinalResponse]:
-    response = ollama.chat(model=f"{name}",messages=[{"role":"system","content":("you are an LLM with some tools. select the most appropriate command and populate its parameters based on the user's and your needs."),},{"role":"user","content":user_prompt},],format=ToolCommand.model_json_schema(),options={"temperature":0},)
-    structured_output = ToolCommand.model_validate_json(response.message.content)
-    return structured_output.command
+def get_llm_command(messages: list)->Union[Websearch,Webfetch,Graphcreatenode,Graphexists,Graphlinknodes,Graphrelations,Databasedelete,Databasenew,Databasesearch,Scratchpadread,Scratchpadappend,Scratchpadclear,FinalResponse]:
+    response = ollama.chat(
+        model=name,
+        messages=messages,
+        format=ToolCommand.model_json_schema(),
+        options={"temperature": 0},
+    )
+    return ToolCommand.model_validate_json(response.message.content).command
+
 
 #parsed function inputs
 
 def database_search(keyword):
     success = True
     error="None"
+    results=[]
+    logging.info(f"database_search called with keyword {keyword}")
     try:
-        cur.execute(f'SELECT * FROM "{modelName}" WHERE subject LIKE ?', (f"%{keyword}%",))
+        cur.execute(f'SELECT * FROM "{modelName}" WHERE subject LIKE ? OR content LIKE ?', (f"%{keyword}%",))
         rows=cur.fetchall()
-        results=[]
         counter=0
         for rel in rows:
             counter+=1
             results.append({f"entry {counter}":str(rel)})
-    except Exception as error:
-        error=str(error)
+    except Exception as e:
+        error=str(e)
         success=False
+        logging.error(f"search failed with error {e}")
     # for rel in result: print(rel)
     return {
                 "success": success,
                 "tool": "database_search",
                 "data": {
                     "keyword": keyword,
-                    "results":results
+                    "results":results if success else "Not determined"
                 },
                 "error": error
             }
@@ -129,12 +153,14 @@ def database_search(keyword):
 def database_new(subject,content):
     error="None"
     success = True
+    logging.info(f"database_new called with subject {subject} and content {content}")
     try:
         cur.execute(f'''INSERT INTO "{modelName}" (subject, content) VALUES (?, ?)''', (subject, content))
         con.commit()
-    except Exception as error:
-        error=str(error)
+    except Exception as e:
+        error=str(e)
         success=False
+        logging.error(f"failed with error {e}")
     return {
                 "success": success,
                 "tool": "database_new",
@@ -148,12 +174,23 @@ def database_new(subject,content):
 def database_delete(id):
     success=True
     error="None"
+    logging.info(f"database_delete called with id {id}")
     try:
         cur.execute(f'DELETE FROM "{modelName}" WHERE id = ?',(id,))
         con.commit()
-    except Exception as error:
-        error=str(error)
+    except Exception as e:
+        error=str(e)
         success=False
+        logging.error(f"failed with error {e}")
+    post = cur.rowcount
+    if 0==post:
+        success=False
+        cur.execute(f'''SELECT * FROM "{modelName}" WHERE id=?''',(id,))
+        test = cur.fetchall()
+        if test == None or test == []:
+            error="No such entry was found"
+        else:
+            error = "delete failed"
     return {
                 "success": success,
                 "tool": "database_delete",
@@ -166,18 +203,21 @@ def database_delete(id):
 def graph_exists(node_name):
     success=True
     error="None"
+    fin = False
+    logging.info(f"graph_exists called with name {node_name}")
     try:
         result = graph.query("""MATCH (n {name: $name}) RETURN n.name""",params={"name": node_name})
         fin = len(result.result_set) > 0
-    except Exception as error:
-        error=str(error)
+    except Exception as e:
+        error=str(e)
         success=False
+        logging.error(f"failed with error {e}")
     return {
             "success": success,
             "tool": "graph_exists",
             "data": {
                 "node_name": node_name,
-                "Node Exists?": fin
+                "Node Exists?": fin if success else "not determined"
             },
             "error": error
         }
@@ -186,6 +226,7 @@ def graph_relations(node_name):
     error="None"
     success=True
     results=[]
+    logging.info(f"graph_relations called with node name {node_name}")
     try:
         result = graph.query("""MATCH (n)-[r]->(m) WHERE n.name = $node_name RETURN n.name, type(r), m.name""",params={"node_name":node_name})
         for row in result.result_set:
@@ -194,9 +235,10 @@ def graph_relations(node_name):
                 "relationship": row[1],
                 "target": row[2]
             })
-    except Exception as error:
-            error=str(error)
+    except Exception as e:
+            error=str(e)
             success = False
+            logging.error(f"failed with error {e}")
     return {
         "success": success,
         "tool": "graph_relations",
@@ -210,11 +252,13 @@ def graph_relations(node_name):
 def graph_create_node(node_name):
     error="None"
     success=True
+    logging.info(f"graph_create_node called with name {node_name}")
     try:
-        graph.query("""CREATE (p {name:$name}) RETURN (p)""",params={"name":node_name})
-    except Exception as error:
-        error=str(error)
+        graph.query("""MERGE (p {name:$name}) RETURN (p)""",params={"name":node_name})
+    except Exception as e:
+        error=str(e)
         success = False
+        logging.error(f"failed with error {e}")
     return {
                 "success": success,
                 "tool": "graph_create_node",
@@ -227,11 +271,14 @@ def graph_create_node(node_name):
 def graph_link_nodes(node_name_1,node_name_2,relationship):
     error="None"
     success=True
+    rel = re.sub(r"\W","_",relationship)
+    logging.info(f"graph_link_nodes called with names {node_name_1} and {node_name_2} with relationship {relationship}")
     try:
-        graph.query(f"""MERGE (a {{name:$name1}}) MERGE (b {{name:$name2}}) MERGE (a)-[r:{relationship}]->(b) RETURN a,r,b""",params={"name1":node_name_1,"name2":node_name_2})
-    except Exception as error:
-        error=str(error)
+        graph.query(f"""MERGE (a {{name:$name1}}) MERGE (b {{name:$name2}}) MERGE (a)-[r:{rel}]->(b) RETURN a,r,b""",params={"name1":node_name_1,"name2":node_name_2})
+    except Exception as e:
+        error=str(e)
         success = False
+        logging.error(f"failed with error {e}")
     return {
             "success": success,
             "tool": "graph_link_nodes",
@@ -246,14 +293,16 @@ def graph_link_nodes(node_name_1,node_name_2,relationship):
 def web_search(keywords):
     error="None"
     success=True
+    logging.info(f"web_search called with keywords {keywords}")
     try:
         search_query=keywords
         ddgs=DDGS()
         results = list(ddgs.text(query=search_query,region='us-en',safesearch='off',max_results=10))
-    except Exception as error:
+    except Exception as e:
         success = False
-        error=str(error)
+        error=str(e)
         results=""
+        logging.error(f"failed with error {e}")
     return {
         "success": success,
         "tool": "web_search",
@@ -267,14 +316,15 @@ def web_search(keywords):
 def web_fetch(url):
     error="None"
     success=True
+    logging.info(f"web_search called with url {url}")
     try:
         downloaded = trafilatura.fetch_url(url)
         text = trafilatura.extract(downloaded)
-    except Exception as error:
+    except Exception as e:
         success=False
-        url=""
         text=""
-        error=str(error)
+        error=str(e)
+        logging.error(f"failed with error {e}")
     if text is None:
         success=False
         text=""
@@ -289,6 +339,64 @@ def web_fetch(url):
                 "error": error
             }
 
+def scratchpad_read():
+    success=True
+    error="None"
+    logging.info("scratchpad_read called")
+    original_content="Not Read"
+    try:
+        with open("D:/scratchpad.txt",'r', encoding='utf-8') as file:
+            original_content = file.read()
+    except Exception as e:
+        error=str(e)
+        success = False
+        logging.error(f"failed with error {e}")
+    return {
+                "success":success,
+                "tool":"scratchpad_read",
+                "data":{
+                    "contents": original_content,
+                },
+                "error": error
+            }
+def scratchpad_append(info):
+    success = True
+    error="None"
+    logging.info(f"scratchpad_append called with info {info}")
+    try:
+        with open("D:/scratchpad.txt",'a', encoding='utf-8') as file:
+            file.write(str(info)+"\n")
+    except Exception as e:
+        error=str(e)
+        success = False
+        logging.error(f"failed with error {e}")
+    return {
+                "success":success,
+                "tool":"scratchpad_append",
+                "data":{
+                    "appended content": info,
+                },
+                "error": error
+            }
+def scratchpad_clear():
+    success = True
+    error="None"
+    logging.info(f"scratchpad_clear called")
+    try:
+        with open("D:/scratchpad.txt",'w', encoding='utf-8') as file:
+            pass
+    except Exception as e:
+        error = str(e)
+        success = False
+        logging.error(f"failed with error {e}")
+    return {
+                "success":success,
+                "tool":"scratchpad_clear",
+                "data":{
+                    "None": "None",
+                },
+                "error": error
+            }
 tools = {"database_search": (database_search, {"keyword"}),
          "database_new":(database_new, {"subject","content"}),
          "database_delete":(database_delete, {"id"}),
@@ -297,7 +405,10 @@ tools = {"database_search": (database_search, {"keyword"}),
          "web_search":(web_search, {"keywords"}),
          "web_fetch":(web_fetch, {"url"}),
          "graph_link_nodes":(graph_link_nodes,{"node_name_1","node_name_2","relationship"}),
-         "graph_create_node":(graph_create_node,{"node_name"})}
+         "graph_create_node":(graph_create_node,{"node_name"}),
+         "scratchpad_read":(scratchpad_read,{None}),
+         "scratchpad_append":(scratchpad_append,{"info"}),
+         "scratchpad_clear":(scratchpad_clear,{None})}
 
 
 #parsing command
@@ -342,8 +453,17 @@ def command_parse(sonion):
         keywords = sonion.keywords
         result = web_search(keywords)
         return result
-    elif command == "response":
-        return response
+    elif command == "scratchpad_read":
+        result = scratchpad_read()
+        return result
+    elif command == "scratchpad_append":
+        info = sonion.info
+        result = scratchpad_append(info)
+        return result
+    elif command=="scratchpad_clear":
+        result = scratchpad_clear()
+        return result
+
 #for agent and tool interaction
 def agent(user_input):
 
@@ -387,7 +507,8 @@ def agent(user_input):
             "role": "user",
             "content": f"Tool result: {json.dumps(result)}"
         })
-        return "I couldn't complete the request within the tool-use limit."
+    return "I couldn't complete the request within the tool-use limit."
+
 #user commands
 def u():
     done = False
@@ -425,6 +546,16 @@ def u():
             v1 = input("enter search keyword (stuff like searching for \"IPhone\" wont work with any other variation of capital\\small letters): ")
             result = web_search(v1)
             print(json.dumps(result, indent=4))
+        elif a=="scratchpad_read":
+            result = scratchpad_read()
+            print(json.dumps(result,indent=4))
+        elif a=="scratchpad_append":
+            v1 = input("enter something to append: ")
+            result = scratchpad_append(v1)
+            print(json.dumps(result,indent=4))
+        elif a=="scratchpad_clear":
+            result = scratchpad_clear()
+            print(json.dumps(result,indent=4))
         elif a=="exit":
             done=True
         else:
