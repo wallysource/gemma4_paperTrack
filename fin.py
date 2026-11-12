@@ -1,20 +1,44 @@
-lazy import ollama
-lazy from falkordb import FalkorDB 
-lazy import re
-lazy import sqlite3
-lazy from ddgs import DDGS
-lazy import json
-lazy from typing import Literal, Union
-lazy from pydantic import BaseModel, Field
-lazy import trafilatura
-lazy import logging
-lazy from datetime import datetime
+import ollama
+from falkordb import FalkorDB 
+import re
+import sqlite3
+from ddgs import DDGS
+import json
+from typing import Annotated, Literal, Union
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+import trafilatura
+import logging
+from datetime import datetime
+from pathlib import Path
 
 #command to install all dependancies:
 #python -m pip install ollama falkordb ddgs trafilatura
-current_datetime_str = datetime.now().strftime("%d-%m-%y %H hours %M minutes,%S seconds")
-logfile = open(f"D:/log {current_datetime_str}.log",'x')
-logging.basicConfig(filename=f"log {current_datetime_str}.log",level=logging.INFO,format="%(asctime)s [%(levelname)s] %(message)s",datefmt="%Y/%m/%d %H:%M:%S")
+
+#creating logging files
+LOG_DIR = Path("D:/logs")
+LOG_DIR.mkdir(parents=True, exist_ok=True)   # create the folder if it doesn't exist
+
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+log_path = LOG_DIR / f"log_{timestamp}.log"
+
+# to make a unique log if two runs start within the same second
+n = 1
+while log_path.exists():
+    log_path = LOG_DIR / f"log_{timestamp}_{n}.log"
+    n += 1
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y/%m/%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler(log_path, mode="w", encoding="utf-8"),
+        logging.StreamHandler(),   # also print to console; remove if unwanted
+    ],
+    force=True,
+)
+
+logging.info("Logging to %s", log_path)
 
 #initialisation checks:
 try:
@@ -53,72 +77,95 @@ except Exception:
 
 #declaring command structure using pydantic
 
-class Databasenew(BaseModel):
+class Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+class NoArgs(Strict):
+    pass
+
+# ---- arguments ----
+class DatabaseNewArgs(Strict):
+    subject: str
+    content: str
+class DatabaseSearchArgs(Strict):
+    keyword: str
+class DatabaseDeleteArgs(Strict):
+    id: int
+class NodeArgs(Strict):                 # reused by graph_exists / graph_relations / graph_create_node
+    node_name: str
+class GraphLinkArgs(Strict):
+    base: str
+    target: str
+    relationship: str
+class WebSearchArgs(Strict):
+    keywords: str
+class WebFetchArgs(Strict):
+    url: str
+class ScratchpadAppendArgs(Strict):
+    info: str
+class FinalArgs(Strict):
+    response: str
+
+# ---- commands ----
+class Databasenew(Strict):
     tool: Literal["database_new"]
-    subject:str
-    content:str
-class Databasesearch(BaseModel):
+    arguments: DatabaseNewArgs
+class Databasesearch(Strict):
     tool: Literal["database_search"]
-    keyword:str
-class Databasedelete(BaseModel):
-    tool:Literal["database_delete"]
-    id:int
-class Graphexists(BaseModel):
-    tool:Literal["graph_exists"]
-    node_name:str
-class Graphrelations(BaseModel):
-    tool:Literal["graph_relations"]
-    node_name:str
-class Graphcreatenode(BaseModel):
-    tool:Literal["graph_create_node"]
-    node_name:str
-class Graphlinknodes(BaseModel):
-    tool:Literal["graph_link_nodes"]
-    node_name_1:str
-    node_name_2:str
-    relationship:str
-class Webfetch(BaseModel):
-    tool:Literal["web_fetch"]
-    url:str
-class Websearch(BaseModel):
-    tool:Literal["web_search"]
-    keywords:str
-class Scratchpadread(BaseModel):
-    tool:Literal["scratchpad_read"]
-class Scratchpadappend(BaseModel):
-    tool:Literal["scratchpad_append"]
-    info:str
-class Scratchpadclear(BaseModel):
-    tool:Literal["scratchpad_clear"]
-class FinalResponse(BaseModel):
-    tool:Literal["final_response"]
-    response:str
-class ToolCommand(BaseModel):
-    command:Union[
-        Websearch,
-        Webfetch,
-        Graphcreatenode,
-        Graphexists,
-        Graphlinknodes,
-        Graphrelations,
-        Databasedelete,
-        Databasenew,
-        Databasesearch,
-        Scratchpadread,
-        Scratchpadappend,
-        Scratchpadclear,
-        FinalResponse
-    ] = Field(...,discriminator="tool")
+    arguments: DatabaseSearchArgs
+class Databasedelete(Strict):
+    tool: Literal["database_delete"]
+    arguments: DatabaseDeleteArgs
+class Graphexists(Strict):
+    tool: Literal["graph_exists"]
+    arguments: NodeArgs
+class Graphrelations(Strict):
+    tool: Literal["graph_relations"]
+    arguments: NodeArgs
+class Graphcreatenode(Strict):
+    tool: Literal["graph_create_node"]
+    arguments: NodeArgs
+class Graphlinknodes(Strict):
+    tool: Literal["graph_link_nodes"]
+    arguments: GraphLinkArgs
+class Websearch(Strict):
+    tool: Literal["web_search"]
+    arguments: WebSearchArgs
+class Webfetch(Strict):
+    tool: Literal["web_fetch"]
+    arguments: WebFetchArgs
+class Scratchpadread(Strict):
+    tool: Literal["scratchpad_read"]
+    arguments: NoArgs
+class Scratchpadappend(Strict):
+    tool: Literal["scratchpad_append"]
+    arguments: ScratchpadAppendArgs
+class Scratchpadclear(Strict):
+    tool: Literal["scratchpad_clear"]
+    arguments: NoArgs
+class FinalResponse(Strict):
+    tool: Literal["response"]
+    arguments: FinalArgs
+
+Command = Annotated[
+    Union[Databasenew, Databasesearch, Databasedelete,
+          Graphexists, Graphrelations, Graphcreatenode, Graphlinknodes,
+          Websearch, Webfetch,
+          Scratchpadread, Scratchpadappend, Scratchpadclear,
+          FinalResponse],
+    Field(discriminator="tool"),
+]
+command_adapter = TypeAdapter(Command)
 inputArr="","",""
 
 def get_llm_command(messages: list)->Union[Websearch,Webfetch,Graphcreatenode,Graphexists,Graphlinknodes,Graphrelations,Databasedelete,Databasenew,Databasesearch,Scratchpadread,Scratchpadappend,Scratchpadclear,FinalResponse]:
     response = ollama.chat(
         model=name,
         messages=messages,
-        format=ToolCommand.model_json_schema(),
+        format=command_adapter.json_schema(),
         options={"temperature": 0},
     )
-    return ToolCommand.model_validate_json(response.message.content).command
+    return command_adapter.validate_json(response.message.content)
 
 
 #parsed function inputs
@@ -129,7 +176,7 @@ def database_search(keyword):
     results=[]
     logging.info(f"database_search called with keyword {keyword}")
     try:
-        cur.execute(f'SELECT * FROM "{modelName}" WHERE subject LIKE ? OR content LIKE ?', (f"%{keyword}%",))
+        cur.execute(f'''SELECT * FROM "{modelName}" WHERE subject LIKE ? OR content LIKE ?''', (f"%{keyword}%",f"%{keyword}%",))
         rows=cur.fetchall()
         counter=0
         for rel in rows:
@@ -268,13 +315,13 @@ def graph_create_node(node_name):
                 "error": error
             }
 
-def graph_link_nodes(node_name_1,node_name_2,relationship):
+def graph_link_nodes(base,target,relationship):
     error="None"
     success=True
     rel = re.sub(r"\W","_",relationship)
-    logging.info(f"graph_link_nodes called with names {node_name_1} and {node_name_2} with relationship {relationship}")
+    logging.info(f"graph_link_nodes called with names {base} and {target} with relationship {relationship}")
     try:
-        graph.query(f"""MERGE (a {{name:$name1}}) MERGE (b {{name:$name2}}) MERGE (a)-[r:{rel}]->(b) RETURN a,r,b""",params={"name1":node_name_1,"name2":node_name_2})
+        graph.query(f"""MERGE (a {{name:$name1}}) MERGE (b {{name:$name2}}) MERGE (a)-[r:{rel}]->(b) RETURN a,r,b""",params={"name1":base,"name2":target})
     except Exception as e:
         error=str(e)
         success = False
@@ -283,8 +330,8 @@ def graph_link_nodes(node_name_1,node_name_2,relationship):
             "success": success,
             "tool": "graph_link_nodes",
             "data": {
-                "node_name_1": node_name_1,
-                "node_name_2": node_name_2,
+                "base": base,
+                "target": target,
                 "relationship":relationship
             },
             "error": error
@@ -359,6 +406,7 @@ def scratchpad_read():
                 },
                 "error": error
             }
+
 def scratchpad_append(info):
     success = True
     error="None"
@@ -378,6 +426,7 @@ def scratchpad_append(info):
                 },
                 "error": error
             }
+
 def scratchpad_clear():
     success = True
     error="None"
@@ -397,6 +446,7 @@ def scratchpad_clear():
                 },
                 "error": error
             }
+
 tools = {"database_search": (database_search, {"keyword"}),
          "database_new":(database_new, {"subject","content"}),
          "database_delete":(database_delete, {"id"}),
@@ -404,7 +454,7 @@ tools = {"database_search": (database_search, {"keyword"}),
          "graph_relations":(graph_relations, {"node_name"}),
          "web_search":(web_search, {"keywords"}),
          "web_fetch":(web_fetch, {"url"}),
-         "graph_link_nodes":(graph_link_nodes,{"node_name_1","node_name_2","relationship"}),
+         "graph_link_nodes":(graph_link_nodes,{"base","target","relationship"}),
          "graph_create_node":(graph_create_node,{"node_name"}),
          "scratchpad_read":(scratchpad_read,{None}),
          "scratchpad_append":(scratchpad_append,{"info"}),
@@ -415,49 +465,49 @@ tools = {"database_search": (database_search, {"keyword"}),
 def command_parse(sonion):
     command = sonion.tool
     if command=="database_new":
-        subject = sonion.subject
-        content = sonion.content
+        subject = sonion.arguments.subject
+        content = sonion.arguments.content
         result=database_new(subject,content)
         return result
     elif command=="database_search":
-        keyword = sonion.keyword
+        keyword = sonion.arguments.keyword
         result = database_search(keyword)
         return result
     elif command=="database_delete":
-        id = sonion.id
+        id = sonion.arguments.id
         result=database_delete(id)
         return result
     elif command=="graph_exists":
-        node_name = sonion.node_name
+        node_name = sonion.arguments.node_name
         result = graph_exists(node_name)
         return result
     elif command == "graph_relations":
-        node_name = sonion.node_name
+        node_name = sonion.arguments.node_name
         result = graph_relations(node_name)
         return result
     elif command == "graph_create_node":
-        node_name = sonion.node_name
+        node_name = sonion.arguments.node_name
         result = graph_create_node(node_name)
         return result
     elif command == "graph_link_nodes":
-        node1 = sonion.node_name_1
-        node2 = sonion.node_name_2
-        relation = sonion.relationship
+        node1 = sonion.arguments.base
+        node2 = sonion.arguments.target
+        relation = sonion.arguments.relationship
         result=graph_link_nodes(node1,node2,relation)
         return result
     elif command == "web_fetch":
-        url = sonion.url
+        url = sonion.arguments.url
         result = web_fetch(url)
         return result
     elif command == "web_search":
-        keywords = sonion.keywords
+        keywords = sonion.arguments.keywords
         result = web_search(keywords)
         return result
     elif command == "scratchpad_read":
         result = scratchpad_read()
         return result
     elif command == "scratchpad_append":
-        info = sonion.info
+        info = sonion.arguments.info
         result = scratchpad_append(info)
         return result
     elif command=="scratchpad_clear":
@@ -471,12 +521,46 @@ def agent(user_input):
         {
             "role": "system",
             "content": (
-                "You are an autonomous AI agent with access to tools. "
-                "Use tools whenever necessary to fulfil the user's request. "
-                "You may execute multiple tools in sequence. "
-                "Examine each tool result before deciding what to do next. "
-                "Only use final_response when you have enough information "
-                "to answer the user."
+                f"""You are an autonomous AI agent with access to tools.
+
+RULES
+- Respond with exactly ONE tool call per message, as a single JSON object and nothing else (no markdown, no commentary).
+- After each call you will receive the tool's result. Examine it before choosing your next action.
+- You may make up to 30 tool calls in total for one request.
+- ALWAYS write your plan to the scratchpad. After finishing each step, read the scratchpad and check the step off.
+- Check the database for existing knowledge before searching the web. Store durable facts you learn.
+- If a tool returns an error or nothing useful, try different arguments or another approach.
+- Call response only when you have enough information to answer the user, or when you want to talk to the user or ask for information or awaiting commands.
+- know that failure is an option, you are allowed to say you cant find anything in the database or graph but try to do it to the best of your ability
+
+TOOLS
+
+1. Database (long-term storage of facts; initially empty)
+- database_new: {{"subject": str, "content": str}} -> creates an entry with id, timestamp, subject, content
+- database_delete: {{"id": int}} -> deletes the entry with that id
+- database_search: {{"keyword": str}} -> returns all entries whose subject or content match
+
+2. Graph (nodes are people, places, things, or concepts; named edges describe relationships; initially empty but may contain information from earlier prompts)
+- graph_exists: {{"node_name": str}} -> returns true/false
+- graph_relations: {{"node_name": str}} -> returns all relationships of the node
+- graph_create_node: {{"node_name": str}} -> creates a node
+- graph_link_nodes: {{"base": str, "target": str, "relationship": str}} -> creates an edge from base to target with that label (both nodes may exist if not they are created)
+
+3. Web
+- web_search: {{"keywords": str}} -> top 10 results (url, title, snippet)
+- web_fetch: {{"url": str}} -> returns the page content
+
+4. Scratchpad (short-term memory; initially empty but may contain something from earlier prompts)
+- scratchpad_read: {{}} -> returns contents
+- scratchpad_append: {{"info": str}} -> appends text
+- scratchpad_clear: {{}} -> clears it
+
+5. response: {{"response": str}} -> sends your answer to the user, use this to ask the user for information or if youre awaiting instructions use the final response tool and ask the user.
+
+OUTPUT FORMAT (valid JSON, double quotes, no trailing commas)
+{{"tool": "database_new", "arguments": {{"subject": "ULTRAKILL", "content": "A game made by Arsi Hakita Patala"}}}}
+{{"tool": "scratchpad_append", "arguments": {{"info": "PLAN: 1:search web 2:store facts 3:answer , search web DONE"}}}}
+"""
             )
         },
         {
@@ -485,14 +569,14 @@ def agent(user_input):
         }
     ]
 
-    for iteration in range(10):
+    for iteration in range(30):
 
         # Ask LLM what to do next
         command = get_llm_command(messages)
 
         # Check whether the agent is finished
         if isinstance(command, FinalResponse):
-            return command.response
+            return command.arguments.response
 
         # Execute selected tool
         result = command_parse(command)
